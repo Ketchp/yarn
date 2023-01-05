@@ -17,8 +17,8 @@ simple_futex( const uint32_t *uaddr,
 }
 
 static long
-time_diff_ms( struct timespec *now, struct timespec *before ) {
-    return 1000 * ( now->tv_sec - before->tv_sec - 1 ) + ( 1000000000l + now->tv_nsec - before->tv_nsec ) / 1000000;
+time_diff_ns( struct timespec *now, struct timespec *before ) {
+    return 1000000l * ( now->tv_sec - before->tv_sec - 1 ) + ( 1000000000l + now->tv_nsec - before->tv_nsec ) / 1000;
 }
 
 
@@ -30,8 +30,8 @@ char *TimeoutExpiredException::what() {
 }
 
 
-Lock::Lock( uint32_t spinlock_time_ms ) noexcept
-    : spin_time( spinlock_time_ms ) {}
+Lock::Lock( uint32_t spinlock_time_ns ) noexcept
+    : spin_time( spinlock_time_ns ) {}
 
 void Lock::lock() noexcept {
     if( tryLock() )
@@ -50,7 +50,7 @@ void Lock::lock() noexcept {
             struct timespec now{};
             clock_gettime( CLOCK_MONOTONIC, &now );
 
-            if( time_diff_ms( &now, &start_time) >= spin_time )
+            if( time_diff_ns( &now, &start_time) >= spin_time )
                 break;
         }
         __sync_add_and_fetch( &waiter_count, 1 );
@@ -59,7 +59,7 @@ void Lock::lock() noexcept {
     }
 }
 
-void Lock::lock( uint32_t timeout_ms ) {
+void Lock::lock( uint32_t timeout_ns ) {
     if( tryLock() )
         return;
 
@@ -75,21 +75,21 @@ void Lock::lock( uint32_t timeout_ms ) {
 
             clock_gettime( CLOCK_MONOTONIC, &now );
 
-            if( time_diff_ms( &now, &start_time) >= std::min( spin_time, timeout_ms ) )
+            if( time_diff_ns( &now, &start_time) >= std::min( spin_time, timeout_ns ) )
                 break;
         }
 
-        long time_diff = time_diff_ms( &now, &start_time );
+        long time_diff = time_diff_ns( &now, &start_time );
 
-        if( time_diff >= timeout_ms )
+        if( time_diff >= timeout_ns )
             throw TimeoutExpiredException( "Timeout expired before lock was possible." );
 
         // time remaining for sleep
-        time_diff -= timeout_ms;
+        time_diff -= timeout_ns;
 
         // store back to now struct
-        now.tv_sec = time_diff / 1000;
-        now.tv_nsec = ( time_diff % 1000 ) * 1000000;
+        now.tv_sec = time_diff / 1000000;
+        now.tv_nsec = ( time_diff % 1000000 ) * 1000;
 
         __sync_add_and_fetch( &waiter_count, 1 );
         simple_futex(&lock_value, FUTEX_WAIT, 1, &now );
@@ -97,7 +97,7 @@ void Lock::lock( uint32_t timeout_ms ) {
 
         // measure time if timeout expired
         clock_gettime( CLOCK_MONOTONIC, &now );
-        if( time_diff_ms( &now, &start_time ) >= timeout_ms )
+        if( time_diff_ns( &now, &start_time ) >= timeout_ns )
             throw TimeoutExpiredException( "Timeout expired before lock was possible." );
     }
 }
@@ -113,8 +113,8 @@ void Lock::unlock() noexcept {
 }
 
 
-Semaphore::Semaphore( uint32_t initial_value, uint32_t spinlock_time_ms ) noexcept
-    : value( initial_value ), spin_time( spinlock_time_ms ) {}
+Semaphore::Semaphore( uint32_t initial_value, uint32_t spinlock_time_ns ) noexcept
+    : value( initial_value ), spin_time( spinlock_time_ns ) {}
 
 void Semaphore::take() noexcept {
     if( tryTake() )
@@ -133,7 +133,7 @@ void Semaphore::take() noexcept {
             struct timespec now{};
             clock_gettime( CLOCK_MONOTONIC, &now );
 
-            if( time_diff_ms( &now, &start_time) >= spin_time )
+            if( time_diff_ns( &now, &start_time) >= spin_time )
                 break;
         }
 
@@ -143,7 +143,7 @@ void Semaphore::take() noexcept {
     }
 }
 
-void Semaphore::take( uint32_t timeout_ms ) {
+void Semaphore::take( uint32_t timeout_ns ) {
     if( tryTake() )
         return;
 
@@ -159,21 +159,21 @@ void Semaphore::take( uint32_t timeout_ms ) {
 
             clock_gettime( CLOCK_MONOTONIC, &now );
 
-            if( time_diff_ms( &now, &start_time) >= std::min( spin_time, timeout_ms ) )
+            if( time_diff_ns( &now, &start_time) >= std::min( spin_time, timeout_ns ) )
                 break;
         }
 
-        long time_diff = time_diff_ms( &now, &start_time );
+        long time_diff = time_diff_ns( &now, &start_time );
 
-        if( time_diff >= timeout_ms )
+        if( time_diff >= timeout_ns )
             throw TimeoutExpiredException( "Timeout expired before take was possible." );
 
         // time remaining for sleep
-        time_diff -= timeout_ms;
+        time_diff -= timeout_ns;
 
         // store back to now struct
-        now.tv_sec = time_diff / 1000;
-        now.tv_nsec = ( time_diff % 1000 ) * 1000000;
+        now.tv_sec = time_diff / 1000000;
+        now.tv_nsec = ( time_diff % 1000000 ) * 1000;
 
         __sync_add_and_fetch( &waiter_count, 1 );
         simple_futex( &value, FUTEX_WAIT, 0, &now );
@@ -181,7 +181,7 @@ void Semaphore::take( uint32_t timeout_ms ) {
 
         // measure time if timeout expired
         clock_gettime( CLOCK_MONOTONIC, &now );
-        if( time_diff_ms( &now, &start_time ) >= timeout_ms )
+        if( time_diff_ns( &now, &start_time ) >= timeout_ns )
             throw TimeoutExpiredException( "Timeout expired before take was possible." );
     }
 }
