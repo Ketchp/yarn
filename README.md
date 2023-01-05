@@ -12,4 +12,27 @@ bug can occur only if switch happens between certain two instructions.
 With that said, yarn also contains/will contain higher level
 synchronisation primitives that offer more control that standard libraries.
 
-You can find whole documentation [here](docs/html/index.html).
+To build with cmake first run:
+```bash
+mkdir build_dir
+cd build_dir
+cmake ..
+```
+To create documentation for library you can start at projects root;
+```bash
+make docs
+```
+
+Documentation main-page will be located at `build_dir/docs/html/index.html`.
+
+To run test you can run:
+```bash
+make test
+```
+
+To build library:
+```bash
+make yarn
+```
+
+Library will be at `build_dir/src/libyarn.a`.
