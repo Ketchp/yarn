@@ -16,7 +16,8 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
 
     include(CTest)
 
-    find_package(Doxygen)
+    find_package(Doxygen
+                 REQUIRED dot)
     if(Doxygen_FOUND)
         add_subdirectory(docs)
     else()
