@@ -57,6 +57,12 @@ TEST_CASE( "Lock tests", "[lock]" ) {
         lock.lock();
         for( uint8_t i = 0; i < 5; i++ ) {
             REQUIRE_THROWS_AS( lock.lock( 10 ), yarn::TimeoutExpiredException );
+            try {
+                lock.lock( 10 );
+            } catch( const yarn::TimeoutExpiredException &e ) {
+                REQUIRE( e.what() == std::string( "Timeout expired before lock was possible." ) );
+            }
+
         }
         lock.unlock();
     }

@@ -4,15 +4,15 @@
 #include <sys/syscall.h>
 #include <linux/futex.h>
 #include <ctime>
-#include <algorithm>
+
 
 using namespace yarn;
 
-static inline long
-simple_futex( const uint32_t *uaddr,
-       int futex_op,
-       uint32_t val,
-       const struct timespec *timeout = nullptr ) {
+inline long
+yarn::_simple_futex( const uint32_t *uaddr,
+                     int futex_op,
+                     uint32_t val,
+                     const struct timespec *timeout ) {
     return syscall( SYS_futex, uaddr, futex_op, val, timeout, nullptr, 0 );
 }
 
@@ -25,7 +25,7 @@ time_diff_ns( struct timespec *now, struct timespec *before ) {
 TimeoutExpiredException::TimeoutExpiredException( const char *msg )
     : error_msg( msg ) {}
 
-char *TimeoutExpiredException::what() {
+[[nodiscard]] const char *TimeoutExpiredException::what() const noexcept {
     return error_msg.data();
 }
 
@@ -54,7 +54,7 @@ void Lock::lock() noexcept {
                 break;
         }
         __sync_add_and_fetch( &waiter_count, 1 );
-        simple_futex(&lock_value, FUTEX_WAIT, 1 );
+        _simple_futex( &lock_value, FUTEX_WAIT, 1 );
         __sync_sub_and_fetch( &waiter_count, 1 );
     }
 }
@@ -92,7 +92,7 @@ void Lock::lock( uint32_t timeout_ns ) {
         now.tv_nsec = ( time_diff % 1000000 ) * 1000;
 
         __sync_add_and_fetch( &waiter_count, 1 );
-        simple_futex(&lock_value, FUTEX_WAIT, 1, &now );
+        _simple_futex( &lock_value, FUTEX_WAIT, 1, &now );
         __sync_sub_and_fetch( &waiter_count, 1 );
 
         // measure time if timeout expired
@@ -109,7 +109,7 @@ void Lock::lock( uint32_t timeout_ns ) {
 void Lock::unlock() noexcept {
     lock_value = 0;
     if( waiter_count )
-        simple_futex( &lock_value, FUTEX_WAKE, 1 );
+        _simple_futex( &lock_value, FUTEX_WAKE, 1 );
 }
 
 
@@ -138,7 +138,7 @@ void Semaphore::take() noexcept {
         }
 
         __sync_add_and_fetch( &waiter_count, 1 );
-        simple_futex(&value, FUTEX_WAIT, 0 );
+        _simple_futex( &value, FUTEX_WAIT, 0 );
         __sync_sub_and_fetch( &waiter_count, 1 );
     }
 }
@@ -176,7 +176,7 @@ void Semaphore::take( uint32_t timeout_ns ) {
         now.tv_nsec = ( time_diff % 1000000 ) * 1000;
 
         __sync_add_and_fetch( &waiter_count, 1 );
-        simple_futex( &value, FUTEX_WAIT, 0, &now );
+        _simple_futex( &value, FUTEX_WAIT, 0, &now );
         __sync_sub_and_fetch( &waiter_count, 1 );
 
         // measure time if timeout expired
@@ -200,7 +200,7 @@ void Semaphore::take( uint32_t timeout_ns ) {
 void Semaphore::give() noexcept {
     __sync_fetch_and_add( &value, 1 );
     if( waiter_count )
-        simple_futex( &value, FUTEX_WAKE, 1 );
+        _simple_futex( &value, FUTEX_WAKE, 1 );
 
 }
 
@@ -210,16 +210,77 @@ void Condition::wait( Lock &lock ) noexcept {
 
     lock.unlock();
 
-    simple_futex( &waiters, FUTEX_WAIT, current );
+    _simple_futex( &waiters, FUTEX_WAIT, current );
     __sync_sub_and_fetch( &waiters, 1 );
 
     lock.lock();
 }
 
-void Condition::notify() noexcept {
-    simple_futex( &waiters, FUTEX_WAKE, 1 );
+void Condition::signal() noexcept {
+    _simple_futex(&waiters, FUTEX_WAKE, 1);
 }
 
-void Condition::notify_all() noexcept {
-    simple_futex( &waiters, FUTEX_WAKE, INT32_MAX );
+void Condition::signal_all() noexcept {
+    _simple_futex(&waiters, FUTEX_WAKE, INT32_MAX);
 }
+
+
+void Monitor::lock() noexcept {
+    if( tryLock() )
+        return;
+
+    struct timespec start_time{};
+    clock_gettime( CLOCK_MONOTONIC, &start_time );
+
+    while( true ) {
+        // only read loop to decrease cache invalidation by CMPXCHG
+        // atomic swap does not execute unless lock value is observed as 0
+        while( true ) {
+            if( tryLock() )
+                return;
+
+            struct timespec now{};
+            clock_gettime( CLOCK_MONOTONIC, &now );
+
+            if( time_diff_ns( &now, &start_time) >= spin_time )
+                break;
+        }
+
+        __sync_add_and_fetch( &lock_waiters, 1 );
+        _simple_futex( &monitor_lock, FUTEX_WAIT, 1 );
+        __sync_sub_and_fetch( &lock_waiters, 1 );
+    }
+}
+
+[[nodiscard]] bool Monitor::tryLock() noexcept {
+    return monitor_lock == 0 && __sync_bool_compare_and_swap( &monitor_lock, 0, 1 );
+}
+
+
+void Monitor::signal_all() noexcept {
+    for( auto &waiter: waiters ) {
+        waiter.predicate = [](){ return true; };
+    }
+}
+
+void Monitor::unlock() noexcept {
+    for( auto &waiter: waiters ) {
+        if( !waiter.predicate() )
+            continue;
+
+        waiter.lock = 1;
+        _simple_futex( &waiter.lock, FUTEX_WAKE, 1 );
+
+        return;
+    }
+
+    silent_unlock();
+}
+
+void Monitor::silent_unlock() noexcept {
+    monitor_lock = 0;
+    if( lock_waiters )
+        _simple_futex( &monitor_lock, FUTEX_WAKE, 1 );
+
+}
+

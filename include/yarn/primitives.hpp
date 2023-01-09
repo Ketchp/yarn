@@ -1,7 +1,10 @@
 #pragma once
 #include <cstdint>
 #include <string>
-#include <concepts>
+#include <type_traits>
+#include <list>
+#include <linux/futex.h>
+#include <functional>
 
 
 /**
@@ -12,6 +15,21 @@
  * @todo Implement threadPool
  */
 namespace yarn {
+    /**
+     * Wrapper for simple functionalities of FUTEX sys-call.
+     * @param uaddr Address of lock associated with block.
+     * @param futex_op FUTEX operation.
+     * @param val Operation dependent. (Expected value/number of wake-ups)
+     * @param timeout Blocking timeout.
+     * @return Status of call.
+     */
+    inline long
+    _simple_futex( const uint32_t *uaddr,
+                   int futex_op,
+                   uint32_t val,
+                   const struct timespec *timeout = nullptr );
+
+
     /**
      * @brief Exception thrown from function that take timeout argument.
      *
@@ -27,9 +45,9 @@ namespace yarn {
         /**
          * @return Exception c-string message.
          */
-        char *what();
+        [[nodiscard]] const char *what() const noexcept override;
     protected:
-        std::string error_msg; /**< Error message. */
+        const std::string error_msg; /**< Error message. */
     };
 
 
@@ -165,7 +183,7 @@ namespace yarn {
         Condition &operator=( const Condition & ) = delete;
 
         /**
-         * Releases lock, and waits for notify or notify all call.
+         * Releases lock, and waits for signal or signal_all call.
          * Lock is again acquired after return from wait.
          * @warning Implementation of wait, can cause spurious wake-ups,
          * so it is vital to re-check the condition after wake.
@@ -175,13 +193,122 @@ namespace yarn {
         /**
          * Wakes up exactly one thread.
          */
-        void notify() noexcept;
+        void signal() noexcept;
 
         /**
          * Wakes up all waiting threads.
          */
-        void notify_all() noexcept;
+        void signal_all() noexcept;
     protected:
         uint32_t waiters = 0;  /**< Number of waiters on this condition. */
+    };
+
+
+    /**
+     * @brief Implementation of monitor similar to pythons monitor.
+     *
+     * Similar to condition variable used but checking of control conditions happens inside Monitor automatically.
+     */
+    class Monitor {
+    public:
+        Monitor() = default;
+
+        Monitor( const Monitor & ) = delete;
+
+        Monitor &operator=( const Monitor & ) = delete;
+
+        /**
+         * Acquires monitors lock.
+         */
+        void lock() noexcept;
+
+        /**
+         * Tries to acquire monitors lock.
+         */
+        [[nodiscard]] bool tryLock() noexcept;
+
+        /**
+         * Suspends caller until predicate evaluates to true.
+         * All predicates are checked and if any evaluates to true
+         * @tparam Callable_T Predicate type.
+         * @param predicate Callable object that returns true when wait should end.
+         */
+        template <typename Callable_T>
+        void wait_for( Callable_T predicate ) {
+            static_assert( std::is_nothrow_invocable_r_v<bool, Callable_T>,
+                    "Predicate must be callable with return type bool." );
+
+            const auto &node = waiters.emplace_back( predicate, 0 );
+            const auto node_it = --waiters.end();
+
+            for( auto it = waiters.begin(); it != waiters.end(); ++it ) {
+                if( !it->predicate() ) {
+                    if( it == node_it )
+                        return;
+                    continue;
+                }
+
+                if( it == node_it )
+                    silent_unlock();
+                else {
+                    it->lock = 1;
+                    _simple_futex(&it->lock, FUTEX_WAKE, 1);
+                }
+
+                _simple_futex( &node.lock, FUTEX_WAIT, 0 );
+
+                // we woke up, so we can erase current node
+                waiters.erase( node_it );
+
+                return;
+            }
+        }
+
+        /**
+         * Releases all waiters without checking predicates.
+         */
+        void signal_all() noexcept;
+
+        /**
+         * Reevaluates all predicates; if some predicate is true, it will gain lock and wake up.
+         * If no predicate is true, lock is released.
+         * @note This implementation assures that waiting threads are served before new accesses to monitor
+         * in well defined order(if more waiting threads compete for lock; first will wake up thread that
+         * went to sleep first).
+         */
+        void unlock() noexcept;
+
+        /**
+         * Releases lock without evaluating predicates; no waiting thread is woken up.
+         * @note This allows only new accesses to monitor to happen.
+         */
+        void silent_unlock() noexcept;
+
+    protected:
+        /**
+         * @brief Internal representation of waiter.
+         *
+         * Representation of waiter with predicate and lock determining wake-up.
+         */
+        struct LockNode {
+            LockNode( const LockNode & ) = delete;
+            LockNode &operator=( const LockNode & ) = delete;
+
+            /**
+             * Predicate evaluated for release.
+             */
+            std::function<bool()> predicate;
+
+            /**
+             * State of waiter; 0- waiter should wait, 1- waiter should be blocked.
+             */
+            uint32_t lock;
+        };
+
+    private:
+        uint32_t monitor_lock = 0;
+        uint32_t lock_waiters = 0;
+        std::list<LockNode> waiters;
+        uint32_t spin_time = 4; // us
     };
 }
